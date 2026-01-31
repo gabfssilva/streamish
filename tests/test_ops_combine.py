@@ -1,5 +1,6 @@
 """Tests for combine operations."""
 
+import asyncio
 from collections.abc import AsyncIterator
 
 import streamish as st
@@ -50,8 +51,6 @@ def test_interleave_unequal() -> None:
 
 
 async def test_merge_async() -> None:
-    import asyncio
-
     async def gen1() -> AsyncIterator[int]:
         for i in [1, 3]:
             await asyncio.sleep(0.01)
