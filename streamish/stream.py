@@ -111,9 +111,23 @@ class Stream[T]:
         """
         return Stream(distinct_op(self._source, window=window, timeout=timeout))  # type: ignore[arg-type]
 
-    def distinct_by[K: Hashable](self, key_fn: Callable[[T], K]) -> "Stream[T]":
-        """Remove duplicates by key function."""
-        return Stream(distinct_by_op(key_fn, self._source))
+    def distinct_by[K: Hashable](
+        self,
+        key_fn: Callable[[T], K],
+        *,
+        window: int | None = None,
+        timeout: float | None = None,
+    ) -> "Stream[T]":
+        """Remove duplicates by key function.
+
+        Args:
+            key_fn: Function to extract key from element
+            window: Only consider last N keys as "seen"
+            timeout: Keys expire from "seen" after N seconds
+        """
+        return Stream(
+            distinct_by_op(key_fn, self._source, window=window, timeout=timeout)
+        )  # type: ignore[arg-type]
 
     def flatten[U](self: "Stream[Iterable[U]]") -> "Stream[U]":
         """Flatten one level of nesting."""

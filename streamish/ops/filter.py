@@ -296,42 +296,127 @@ async def _distinct_async[T: Hashable](
 
 @overload
 def distinct_by[T, K: Hashable](
-    key_fn: Callable[[T], K], it: Iterable[T]
+    key_fn: Callable[[T], K],
+    it: Iterable[T],
+    *,
+    window: int | None = None,
+    timeout: float | None = None,
 ) -> Iterator[T]: ...
 
 
 @overload
 def distinct_by[T, K: Hashable](
-    key_fn: Callable[[T], K], it: AsyncIterable[T]
+    key_fn: Callable[[T], K],
+    it: AsyncIterable[T],
+    *,
+    window: int | None = None,
+    timeout: float | None = None,
 ) -> AsyncIterator[T]: ...
 
 
 def distinct_by[T, K: Hashable](
-    key_fn: Callable[[T], K], it: Iterable[T] | AsyncIterable[T]
+    key_fn: Callable[[T], K],
+    it: Iterable[T] | AsyncIterable[T],
+    *,
+    window: int | None = None,
+    timeout: float | None = None,
 ) -> Iterator[T] | AsyncIterator[T]:
-    """Remove duplicates by key function."""
+    """Remove duplicates by key function.
+
+    Args:
+        key_fn: Function to extract key from element
+        it: Input iterable
+        window: Only consider last N keys as "seen"
+        timeout: Keys expire from "seen" after N seconds
+    """
     if is_async_iterable(it):
-        return _distinct_by_async(key_fn, it)  # type: ignore[arg-type]
-    return _distinct_by_sync(key_fn, it)  # type: ignore[arg-type, return-value]
+        return _distinct_by_async(key_fn, it, window, timeout)  # type: ignore[arg-type]
+    return _distinct_by_sync(key_fn, it, window, timeout)  # type: ignore[arg-type, return-value]
 
 
 def _distinct_by_sync[T, K: Hashable](
-    key_fn: Callable[[T], K], it: Iterable[T]
+    key_fn: Callable[[T], K],
+    it: Iterable[T],
+    window: int | None,
+    timeout: float | None,
 ) -> Iterator[T]:
-    seen: set[K] = set()
-    for item in it:
-        key = key_fn(item)
-        if key not in seen:
-            seen.add(key)
-            yield item
+    if window is None and timeout is None:
+        seen: set[K] = set()
+        for item in it:
+            key = key_fn(item)
+            if key not in seen:
+                seen.add(key)
+                yield item
+    elif timeout is None:
+        seen_deque: deque[K] = deque(maxlen=window)
+        seen_set: set[K] = set()
+        for item in it:
+            key = key_fn(item)
+            if key not in seen_set:
+                if len(seen_deque) == window:
+                    oldest = seen_deque[0]
+                    seen_set.discard(oldest)
+                seen_deque.append(key)
+                seen_set.add(key)
+                yield item
+    else:
+        seen_times: dict[K, float] = {}
+        seen_order: deque[K] = deque(maxlen=window) if window else deque()
+        for item in it:
+            key = key_fn(item)
+            now = time.monotonic()
+            expired = [k for k, t in seen_times.items() if now - t > timeout]
+            for k in expired:
+                del seen_times[k]
+            if window and len(seen_order) == window:
+                oldest = seen_order[0]
+                seen_times.pop(oldest, None)
+            if key not in seen_times:
+                seen_times[key] = now
+                if window:
+                    seen_order.append(key)
+                yield item
 
 
 async def _distinct_by_async[T, K: Hashable](
-    key_fn: Callable[[T], K], it: AsyncIterable[T]
+    key_fn: Callable[[T], K],
+    it: AsyncIterable[T],
+    window: int | None,
+    timeout: float | None,
 ) -> AsyncIterator[T]:
-    seen: set[K] = set()
-    async for item in it:
-        key = key_fn(item)
-        if key not in seen:
-            seen.add(key)
-            yield item
+    if window is None and timeout is None:
+        seen: set[K] = set()
+        async for item in it:
+            key = key_fn(item)
+            if key not in seen:
+                seen.add(key)
+                yield item
+    elif timeout is None:
+        seen_deque: deque[K] = deque(maxlen=window)
+        seen_set: set[K] = set()
+        async for item in it:
+            key = key_fn(item)
+            if key not in seen_set:
+                if len(seen_deque) == window:
+                    oldest = seen_deque[0]
+                    seen_set.discard(oldest)
+                seen_deque.append(key)
+                seen_set.add(key)
+                yield item
+    else:
+        seen_times: dict[K, float] = {}
+        seen_order: deque[K] = deque(maxlen=window) if window else deque()
+        async for item in it:
+            key = key_fn(item)
+            now = time.monotonic()
+            expired = [k for k, t in seen_times.items() if now - t > timeout]
+            for k in expired:
+                del seen_times[k]
+            if window and len(seen_order) == window:
+                oldest = seen_order[0]
+                seen_times.pop(oldest, None)
+            if key not in seen_times:
+                seen_times[key] = now
+                if window:
+                    seen_order.append(key)
+                yield item

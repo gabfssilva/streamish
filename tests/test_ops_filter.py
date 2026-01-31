@@ -104,7 +104,7 @@ def test_distinct_with_window_fluent() -> None:
 
 
 def test_distinct_with_timeout() -> None:
-    result = []
+    result: list[int] = []
     for item in st.distinct([1, 2, 1, 3, 1], timeout=0.05):
         result.append(item)
         if item == 2:
@@ -121,3 +121,38 @@ async def test_distinct_with_window_async() -> None:
 
     result = [x async for x in st.distinct(gen(), window=3)]
     assert result == [1, 2, 3, 4, 1]
+
+
+def test_distinct_by_with_window() -> None:
+    # Window of 2: key can reappear after 2 new keys
+    data = [{"id": 1}, {"id": 2}, {"id": 1}, {"id": 3}, {"id": 1}]
+    result = list(st.distinct_by(lambda x: x["id"], data, window=2))
+    # id=1 seen, id=2 seen, id=1 still in window (skip), id=3 seen (id=1 pushed out), id=1 not in window (yield)
+    assert result == [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 1}]
+
+
+def test_distinct_by_with_window_fluent() -> None:
+    result = list(st.stream(["a", "bb", "a", "ccc", "a"]).distinct_by(len, window=2))
+    # len=1 seen, len=2 seen, len=1 still in window (skip), len=3 seen (len=1 pushed out), len=1 not in window (yield)
+    assert result == ["a", "bb", "ccc", "a"]
+
+
+def test_distinct_by_with_timeout() -> None:
+    data = [{"id": 1}, {"id": 2}, {"id": 1}, {"id": 3}, {"id": 1}]
+    result: list[dict[str, int]] = []
+    for item in st.distinct_by(lambda x: x["id"], data, timeout=0.05):
+        result.append(item)
+        if item["id"] == 2:
+            time.sleep(0.1)  # Wait for id=1 to expire
+
+    # id=1 seen, id=2 seen, sleep 0.1s, id=1 expired (yield), id=3 seen, id=1 still fresh (skip)
+    assert result == [{"id": 1}, {"id": 2}, {"id": 1}, {"id": 3}]
+
+
+async def test_distinct_by_with_window_async() -> None:
+    async def gen() -> AsyncIterator[dict[str, int]]:
+        for item in [{"id": 1}, {"id": 2}, {"id": 1}, {"id": 3}, {"id": 1}]:
+            yield item
+
+    result = [x async for x in st.distinct_by(lambda x: x["id"], gen(), window=2)]
+    assert result == [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 1}]
