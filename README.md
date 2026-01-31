@@ -85,7 +85,7 @@ async for response in st.map_async(fetch, urls(), concurrency=10):
 | `skip(n, it)` | Skip first n elements |
 | `take_while(pred, it)` | Take while predicate is true |
 | `skip_while(pred, it)` | Skip while predicate is true |
-| `distinct(it)` | Remove duplicates |
+| `distinct(it, window=N, timeout=T)` | Remove duplicates (with optional LRU window or expiry) |
 | `distinct_by(key_fn, it)` | Remove duplicates by key |
 
 ### Group

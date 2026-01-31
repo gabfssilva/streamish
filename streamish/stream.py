@@ -97,9 +97,19 @@ class Stream[T]:
         """Skip elements while predicate is true."""
         return Stream(skip_while_op(pred, self._source))
 
-    def distinct(self) -> "Stream[T]":
-        """Remove duplicates."""
-        return Stream(distinct_op(self._source))  # type: ignore[arg-type]
+    def distinct(
+        self,
+        *,
+        window: int | None = None,
+        timeout: float | None = None,
+    ) -> "Stream[T]":
+        """Remove duplicates.
+
+        Args:
+            window: Only consider last N elements as "seen"
+            timeout: Elements expire from "seen" after N seconds
+        """
+        return Stream(distinct_op(self._source, window=window, timeout=timeout))  # type: ignore[arg-type]
 
     def distinct_by[K: Hashable](self, key_fn: Callable[[T], K]) -> "Stream[T]":
         """Remove duplicates by key function."""

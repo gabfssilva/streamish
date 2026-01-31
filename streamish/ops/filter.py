@@ -1,5 +1,7 @@
 """Filter operations."""
 
+import time
+from collections import deque
 from collections.abc import (
     AsyncIterable,
     AsyncIterator,
@@ -160,36 +162,136 @@ async def _skip_while_async[T](
 
 
 @overload
-def distinct[T: Hashable](it: Iterable[T]) -> Iterator[T]: ...
+def distinct[T: Hashable](
+    it: Iterable[T],
+    *,
+    window: int | None = None,
+    timeout: float | None = None,
+) -> Iterator[T]: ...
 
 
 @overload
-def distinct[T: Hashable](it: AsyncIterable[T]) -> AsyncIterator[T]: ...
+def distinct[T: Hashable](
+    it: AsyncIterable[T],
+    *,
+    window: int | None = None,
+    timeout: float | None = None,
+) -> AsyncIterator[T]: ...
 
 
 def distinct[T: Hashable](
     it: Iterable[T] | AsyncIterable[T],
+    *,
+    window: int | None = None,
+    timeout: float | None = None,
 ) -> Iterator[T] | AsyncIterator[T]:
-    """Remove duplicates."""
+    """Remove duplicates.
+
+    Args:
+        it: Input iterable
+        window: Only consider last N elements as "seen" (LRU-style)
+        timeout: Elements expire from "seen" after N seconds
+
+    Without parameters, keeps all seen elements in memory (original behavior).
+    With window and/or timeout, elements can reappear after leaving the window.
+    """
     if is_async_iterable(it):
-        return _distinct_async(it)  # type: ignore[arg-type]
-    return _distinct_sync(it)  # type: ignore[arg-type, return-value]
+        return _distinct_async(it, window, timeout)  # type: ignore[arg-type]
+    return _distinct_sync(it, window, timeout)  # type: ignore[arg-type, return-value]
 
 
-def _distinct_sync[T: Hashable](it: Iterable[T]) -> Iterator[T]:
-    seen: set[T] = set()
-    for item in it:
-        if item not in seen:
-            seen.add(item)
-            yield item
+def _distinct_sync[T: Hashable](
+    it: Iterable[T],
+    window: int | None,
+    timeout: float | None,
+) -> Iterator[T]:
+    if window is None and timeout is None:
+        # Original behavior: infinite memory
+        seen: set[T] = set()
+        for item in it:
+            if item not in seen:
+                seen.add(item)
+                yield item
+    elif timeout is None:
+        # Window only: use deque for LRU
+        seen_deque: deque[T] = deque(maxlen=window)
+        seen_set: set[T] = set()
+        for item in it:
+            if item not in seen_set:
+                if len(seen_deque) == window:
+                    # Remove oldest from set
+                    oldest = seen_deque[0]
+                    seen_set.discard(oldest)
+                seen_deque.append(item)
+                seen_set.add(item)
+                yield item
+    else:
+        # Timeout (with optional window): use dict with timestamps
+        seen_times: dict[T, float] = {}
+        seen_order: deque[T] = deque(maxlen=window) if window else deque()
+        for item in it:
+            now = time.monotonic()
+            # Clean expired entries
+            expired = [k for k, t in seen_times.items() if now - t > timeout]
+            for k in expired:
+                del seen_times[k]
+            # Check window limit
+            if window and len(seen_order) == window:
+                oldest = seen_order[0]
+                seen_times.pop(oldest, None)
+            # Check if seen
+            if item not in seen_times:
+                seen_times[item] = now
+                if window:
+                    seen_order.append(item)
+                yield item
 
 
-async def _distinct_async[T: Hashable](it: AsyncIterable[T]) -> AsyncIterator[T]:
-    seen: set[T] = set()
-    async for item in it:
-        if item not in seen:
-            seen.add(item)
-            yield item
+async def _distinct_async[T: Hashable](
+    it: AsyncIterable[T],
+    window: int | None,
+    timeout: float | None,
+) -> AsyncIterator[T]:
+    if window is None and timeout is None:
+        # Original behavior: infinite memory
+        seen: set[T] = set()
+        async for item in it:
+            if item not in seen:
+                seen.add(item)
+                yield item
+    elif timeout is None:
+        # Window only: use deque for LRU
+        seen_deque: deque[T] = deque(maxlen=window)
+        seen_set: set[T] = set()
+        async for item in it:
+            if item not in seen_set:
+                if len(seen_deque) == window:
+                    # Remove oldest from set
+                    oldest = seen_deque[0]
+                    seen_set.discard(oldest)
+                seen_deque.append(item)
+                seen_set.add(item)
+                yield item
+    else:
+        # Timeout (with optional window): use dict with timestamps
+        seen_times: dict[T, float] = {}
+        seen_order: deque[T] = deque(maxlen=window) if window else deque()
+        async for item in it:
+            now = time.monotonic()
+            # Clean expired entries
+            expired = [k for k, t in seen_times.items() if now - t > timeout]
+            for k in expired:
+                del seen_times[k]
+            # Check window limit
+            if window and len(seen_order) == window:
+                oldest = seen_order[0]
+                seen_times.pop(oldest, None)
+            # Check if seen
+            if item not in seen_times:
+                seen_times[item] = now
+                if window:
+                    seen_order.append(item)
+                yield item
 
 
 @overload
