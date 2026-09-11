@@ -1,7 +1,10 @@
 """Tests for group operations."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import suppress
+
+import pytest
 
 import streamish as st
 
@@ -34,6 +37,67 @@ async def test_batch_with_timeout() -> None:
 
     result = [x async for x in st.batch(10, slow_gen(), timeout=0.1)]
     assert result == [[0], [1], [2]]
+
+
+async def test_batch_timeout_counts_from_first_item() -> None:
+    async def steady() -> AsyncIterator[int]:
+        for i in range(20):
+            await asyncio.sleep(0.01)
+            yield i
+
+    result = [x async for x in st.batch(100, steady(), timeout=0.03)]
+    assert [i for batch in result for i in batch] == list(range(20))
+    assert max(len(batch) for batch in result) < 10
+
+
+async def test_batch_timeout_close_closes_source() -> None:
+    closed = asyncio.Event()
+
+    async def endless() -> AsyncIterator[int]:
+        try:
+            while True:
+                yield 0
+        finally:
+            closed.set()
+
+    batches = st.batch(2, endless(), timeout=1)
+    assert await anext(batches) == [0, 0]
+    assert isinstance(batches, AsyncGenerator)
+    await batches.aclose()
+    assert closed.is_set()
+
+
+async def test_batch_timeout_cancel_closes_source() -> None:
+    closed = asyncio.Event()
+
+    async def idle() -> AsyncIterator[int]:
+        try:
+            yield 0
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    async def consume() -> None:
+        async for _ in st.batch(10, idle(), timeout=0.01):
+            pass
+
+    tasks = asyncio.all_tasks()
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0.05)
+    consumer.cancel()
+    with suppress(asyncio.CancelledError):
+        await consumer
+    assert closed.is_set()
+    assert asyncio.all_tasks() == tasks
+
+
+async def test_batch_timeout_propagates_source_error() -> None:
+    async def failing() -> AsyncIterator[int]:
+        yield 0
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError, match="boom"):
+        await anext(st.batch(10, failing(), timeout=1))
 
 
 def test_window_sync() -> None:

@@ -146,7 +146,11 @@ class Stream[T]:
         return Stream(scan_op(fn, self._source, initial=initial))
 
     def batch(self, size: int, *, timeout: float | None = None) -> "Stream[list[T]]":
-        """Group elements into batches by size or timeout."""
+        """Group elements into batches of up to `size`.
+
+        With `timeout`, a partial batch is emitted `timeout` seconds after its
+        first element.
+        """
         return Stream(batch_op(size, self._source, timeout=timeout))
 
     def window(self, size: int, *, step: int = 1) -> "Stream[list[T]]":

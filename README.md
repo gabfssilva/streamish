@@ -92,7 +92,7 @@ async for response in st.map_async(fetch, urls(), concurrency=10):
 
 | Operation | Description |
 |-----------|-------------|
-| `batch(size, it, timeout=None)` | Group into batches by size or timeout |
+| `batch(size, it, timeout=None)` | Group into batches of up to size; a partial batch is emitted timeout seconds after its first element |
 | `window(size, it, step=1)` | Sliding window |
 | `partition(pred, it)` | Split into (matches, non_matches) |
 

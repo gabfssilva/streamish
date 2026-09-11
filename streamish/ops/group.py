@@ -2,7 +2,15 @@
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Iterator,
+)
+from contextlib import suppress
 from typing import overload
 
 from streamish._util import ensure_async_iterator, is_async_iterable
@@ -28,11 +36,19 @@ def batch[T](
     *,
     timeout: float | None = None,
 ) -> Iterator[list[T]] | AsyncIterator[list[T]]:
-    """Group elements into batches by size or timeout."""
+    """Group elements into batches of up to `size`.
+
+    With `timeout`, iteration is async and a partial batch is emitted `timeout`
+    seconds after its first element. A background task reads the source up to
+    `size` elements ahead, and an async generator source is closed when
+    iteration stops.
+    """
     if size <= 0:
         raise ValueError("size must be positive")
-    if is_async_iterable(it) or timeout is not None:
-        return _batch_async(size, it, timeout)  # type: ignore[arg-type]
+    if timeout is not None:
+        return _batch_timeout(size, it, timeout)
+    if is_async_iterable(it):
+        return _batch_async(size, it)
     return _batch_sync(size, it)  # type: ignore[arg-type, return-value]
 
 
@@ -47,55 +63,80 @@ def _batch_sync[T](size: int, it: Iterable[T]) -> Iterator[list[T]]:
         yield current
 
 
-async def _batch_async[T](
-    size: int,
-    it: Iterable[T] | AsyncIterable[T],
-    timeout: float | None,
-) -> AsyncIterator[list[T]]:
+async def _batch_async[T](size: int, it: AsyncIterable[T]) -> AsyncIterator[list[T]]:
     current: list[T] = []
-
-    ait: AsyncIterator[T]
-    if is_async_iterable(it):
-        ait = it.__aiter__()  # type: ignore[union-attr]
-    else:
-        sync_it: Iterable[T] = it  # type: ignore[assignment]
-        ait = ensure_async_iterator(iter(sync_it))
-
-    if timeout is None:
-        async for item in ait:
-            current.append(item)
-            if len(current) >= size:
-                yield current
-                current = []
-        if current:
+    async for item in it:
+        current.append(item)
+        if len(current) >= size:
             yield current
-    else:
-        # Use a task-based approach to avoid cancelling the iterator
-        async def get_next() -> T:
-            return await ait.__anext__()
+            current = []
+    if current:
+        yield current
 
-        pending_task: asyncio.Task[T] | None = None
+
+class _Done:
+    """Marks that the reader task of `_batch_timeout` has finished."""
+
+
+async def _batch_timeout[T](
+    size: int, it: Iterable[T] | AsyncIterable[T], timeout: float
+) -> AsyncIterator[list[T]]:
+    source: AsyncIterator[T] = (
+        it.__aiter__()
+        if isinstance(it, AsyncIterable)
+        else ensure_async_iterator(iter(it))
+    )
+    # A single task reads the source, so a deadline never cancels a pending
+    # `__anext__`, and items it already queued are taken without suspending.
+    queue: asyncio.Queue[T | _Done] = asyncio.Queue(size)
+
+    async def read() -> None:
+        async for item in source:
+            await queue.put(item)
+
+    def wake(_: asyncio.Task[None]) -> None:
+        # A full queue means the consumer is not blocked on it, and the consumer
+        # checks the reader before blocking again.
+        with suppress(asyncio.QueueFull):
+            queue.put_nowait(_Done())
+
+    async def wait(deadline: float | None) -> T | _Done:
+        if reader.done():
+            return _Done()
+        async with asyncio.timeout_at(deadline):
+            return await queue.get()
+
+    reader = asyncio.create_task(read())
+    reader.add_done_callback(wake)
+    loop = asyncio.get_running_loop()
+    try:
         while True:
-            try:
-                if pending_task is None:
-                    pending_task = asyncio.create_task(get_next())
-                item = await asyncio.wait_for(
-                    asyncio.shield(pending_task), timeout=timeout
-                )
-                pending_task = None  # Task completed, clear it
+            item = queue.get_nowait() if not queue.empty() else await wait(None)
+            current: list[T] = []
+            deadline = loop.time() + timeout
+            while not isinstance(item, _Done):
                 current.append(item)
                 if len(current) >= size:
-                    yield current
-                    current = []
-            except TimeoutError:
+                    break
+                try:
+                    item = (
+                        queue.get_nowait()
+                        if not queue.empty()
+                        else await wait(deadline)
+                    )
+                except TimeoutError:
+                    break
+            if isinstance(item, _Done):
+                reader.result()
                 if current:
                     yield current
-                    current = []
-                # pending_task is still running, will be awaited next iteration
-            except StopAsyncIteration:
-                if current:
-                    yield current
-                break
+                return
+            yield current
+    finally:
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)
+        if isinstance(source, AsyncGenerator):
+            await source.aclose()
 
 
 @overload
