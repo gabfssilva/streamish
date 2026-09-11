@@ -31,3 +31,12 @@ async def test_stream_async_iteration_from_async() -> None:
     s = Stream(gen())
     result = [x async for x in s]
     assert result == [1, 2, 3]
+
+
+async def test_stream_zip_with_async() -> None:
+    async def gen() -> AsyncIterator[str]:
+        for c in "ab":
+            yield c
+
+    result = [x async for x in Stream([1, 2, 3]).zip(gen())]
+    assert result == [(1, "a"), (2, "b")]

@@ -1,7 +1,10 @@
 """Tests for transform operations."""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import suppress
+
+import pytest
 
 import streamish as st
 
@@ -142,3 +145,102 @@ async def test_map_async_fluent() -> None:
 
     result = [x async for x in st.stream([1, 2, 3]).map_async(double, concurrency=2)]
     assert result == [2, 4, 6]
+
+
+async def test_map_async_close_cancels_calls() -> None:
+    async def fn(x: int) -> int:
+        if x > 1:
+            await asyncio.Event().wait()
+        return x
+
+    tasks = asyncio.all_tasks()
+    results = st.map_async(fn, [1, 2, 3, 4], concurrency=3)
+    assert await anext(results) == 1
+    assert isinstance(results, AsyncGenerator)
+    await results.aclose()
+    assert asyncio.all_tasks() == tasks
+
+
+async def test_map_async_cancel_cancels_calls() -> None:
+    async def fn(x: int) -> int:
+        await asyncio.Event().wait()
+        return x
+
+    async def consume() -> None:
+        async for _ in st.map_async(fn, [1, 2, 3], concurrency=2):
+            pass
+
+    tasks = asyncio.all_tasks()
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0.01)
+    consumer.cancel()
+    with suppress(asyncio.CancelledError):
+        await consumer
+    assert asyncio.all_tasks() == tasks
+
+
+async def test_map_async_fn_error_cancels_calls() -> None:
+    async def fn(x: int) -> int:
+        if x == 1:
+            raise ValueError("boom")
+        await asyncio.Event().wait()
+        return x
+
+    tasks = asyncio.all_tasks()
+    with pytest.raises(ValueError, match="boom"):
+        await anext(st.map_async(fn, [1, 2, 3], concurrency=3))
+    assert asyncio.all_tasks() == tasks
+
+
+async def test_map_async_fn_error_fails_fast() -> None:
+    async def fn(x: int) -> int:
+        if x == 2:
+            raise ValueError("boom")
+        await asyncio.sleep(1)
+        return x
+
+    loop = asyncio.get_running_loop()
+    tasks = asyncio.all_tasks()
+    start = loop.time()
+    with pytest.raises(ValueError, match="boom"):
+        await anext(st.map_async(fn, [1, 2, 3], concurrency=3))
+    assert loop.time() - start < 0.5
+    assert asyncio.all_tasks() == tasks
+
+
+async def test_map_async_source_error_cancels_calls() -> None:
+    async def fn(x: int) -> int:
+        await asyncio.Event().wait()
+        return x
+
+    async def failing() -> AsyncIterator[int]:
+        yield 1
+        raise ValueError("boom")
+
+    tasks = asyncio.all_tasks()
+    with pytest.raises(ValueError, match="boom"):
+        await anext(st.map_async(fn, failing(), concurrency=2))
+    assert asyncio.all_tasks() == tasks
+
+
+async def test_map_async_bounds_read_ahead() -> None:
+    started: list[int] = []
+
+    async def fn(x: int) -> int:
+        started.append(x)
+        if x == 0:
+            await asyncio.sleep(0.01)
+        return x
+
+    results = st.map_async(fn, range(50), concurrency=2)
+    assert await anext(results) == 0
+    assert started == [0, 1]
+    assert [x async for x in results] == list(range(1, 50))
+
+
+def test_map_async_validates_concurrency_eagerly() -> None:
+    async def fn(x: int) -> int:
+        return x
+
+    with pytest.raises(ValueError, match="concurrency"):
+        st.map_async(fn, [1], concurrency=0)

@@ -1,4 +1,18 @@
-"""Streamish - Iterator and async iterator utilities."""
+"""Iterator and async iterator utilities.
+
+Each operation exists as a function that takes the iterable as an argument,
+and as a chainable method on `Stream`. Most operations accept both sync and
+async iterables: an async input gives an async result, and some operations,
+such as `map` with a coroutine function, also turn a sync input async.
+
+Examples
+--------
+>>> import streamish as st
+>>> list(st.take(2, st.filter(lambda x: x > 4, st.map(lambda x: x * 2, range(10)))))
+[6, 8]
+>>> list(st.stream(range(10)).map(lambda x: x * 2).filter(lambda x: x > 4).take(2))
+[6, 8]
+"""
 
 from collections.abc import AsyncIterable, Iterable
 
@@ -59,5 +73,22 @@ __all__ = [
 
 
 def stream[T](source: Iterable[T] | AsyncIterable[T]) -> Stream[T]:
-    """Create a Stream from an iterable or async iterable."""
+    """Wrap `source` in a `Stream` for chaining operations.
+
+    Parameters
+    ----------
+    source
+        The elements to stream, sync or async.
+
+    Returns
+    -------
+    Stream[T]
+        A lazy stream over `source`.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> list(st.stream("abc").map(str.upper))
+    ['A', 'B', 'C']
+    """
     return Stream(source)

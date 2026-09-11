@@ -30,6 +30,7 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+addopts = "--doctest-modules"
 
 [tool.pyright]
 pythonVersion = "3.12"
@@ -42,7 +43,7 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "D",        # docstrings (optional for library)
+    "D105",     # magic methods are documented by their class
     "COM812",   # trailing comma (conflicts with formatter)
     "ISC001",   # implicit string concat (conflicts with formatter)
     "A004",     # shadowing builtins is intentional (map, filter, enumerate)
@@ -60,8 +61,11 @@ ignore = [
     "ASYNC109", # timeout parameter naming is intentional
 ]
 
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "PLR2004"]  # assert, magic values ok in tests
+"tests/*" = ["S101", "PLR2004", "D"]  # assert, magic values, docstrings ok in tests
 
 [dependency-groups]
 dev = [

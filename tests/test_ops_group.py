@@ -39,6 +39,11 @@ async def test_batch_with_timeout() -> None:
     assert result == [[0], [1], [2]]
 
 
+async def test_batch_timeout_sync_source() -> None:
+    result = [x async for x in st.batch(2, [1, 2, 3], timeout=1)]
+    assert result == [[1, 2], [3]]
+
+
 async def test_batch_timeout_counts_from_first_item() -> None:
     async def steady() -> AsyncIterator[int]:
         for i in range(20):

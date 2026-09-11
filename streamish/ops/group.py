@@ -20,7 +20,7 @@ __all__ = ["batch", "window", "partition", "partition_async"]
 
 @overload
 def batch[T](
-    size: int, it: Iterable[T], *, timeout: float | None = None
+    size: int, it: Iterable[T], *, timeout: None = None
 ) -> Iterator[list[T]]: ...
 
 
@@ -30,18 +30,64 @@ def batch[T](
 ) -> AsyncIterator[list[T]]: ...
 
 
+@overload
+def batch[T](
+    size: int, it: Iterable[T] | AsyncIterable[T], *, timeout: float
+) -> AsyncIterator[list[T]]: ...
+
+
 def batch[T](
     size: int,
     it: Iterable[T] | AsyncIterable[T],
     *,
     timeout: float | None = None,
 ) -> Iterator[list[T]] | AsyncIterator[list[T]]:
-    """Group elements into batches of up to `size`.
+    """Group elements into lists of up to `size`.
 
-    With `timeout`, iteration is async and a partial batch is emitted `timeout`
-    seconds after its first element. A background task reads the source up to
-    `size` elements ahead, and an async generator source is closed when
-    iteration stops.
+    A batch is emitted when it is full. The last batch holds whatever remains
+    and may be shorter.
+
+    Without `timeout`, the result is async only if `it` is async. With
+    `timeout`, the result is always async, and a batch that is not full is
+    also emitted `timeout` seconds after it received its first element.
+
+    Parameters
+    ----------
+    size
+        Maximum number of elements per batch. Must be positive.
+    it
+        Source elements.
+    timeout
+        Seconds a batch may wait for more elements after receiving its first
+        one. `None` waits until the batch is full or the source ends.
+
+    Returns
+    -------
+    Iterator[list[T]] | AsyncIterator[list[T]]
+        The batches, in source order.
+
+    Raises
+    ------
+    ValueError
+        If `size` is not positive. Raised when `batch` is called, not when
+        iteration starts.
+
+    See Also
+    --------
+    window : Fixed-size groups that can overlap.
+
+    Notes
+    -----
+    With `timeout`, a background task reads `it`, so a deadline never
+    interrupts a pending read. The task reads at most `size` + 1 elements
+    beyond those already emitted. When iteration stops, the task is cancelled
+    and an async generator source is closed.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> list(st.batch(2, [1, 2, 3, 4, 5]))
+    [[1, 2], [3, 4], [5]]
     """
     if size <= 0:
         raise ValueError("size must be positive")
@@ -152,7 +198,45 @@ def window[T](
 def window[T](
     size: int, it: Iterable[T] | AsyncIterable[T], *, step: int = 1
 ) -> Iterator[list[T]] | AsyncIterator[list[T]]:
-    """Sliding window over elements."""
+    """Slide a fixed-size window over the elements.
+
+    Each window is a new list of `size` consecutive elements. The next window
+    starts `step` elements after the previous one, so windows overlap when
+    `step < size` and skip elements when `step > size`. Only full windows are
+    emitted; trailing elements that cannot fill one are dropped.
+
+    Parameters
+    ----------
+    size
+        Number of elements per window. Must be positive.
+    it
+        Source elements. The result is async if `it` is async.
+    step
+        Distance between the starts of consecutive windows. Must be positive.
+
+    Returns
+    -------
+    Iterator[list[T]] | AsyncIterator[list[T]]
+        The windows, in source order.
+
+    Raises
+    ------
+    ValueError
+        If `size` or `step` is not positive. Raised when `window` is called,
+        not when iteration starts.
+
+    See Also
+    --------
+    batch : Non-overlapping groups that keep the trailing partial group.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> list(st.window(3, [1, 2, 3, 4, 5]))
+    [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
+    >>> list(st.window(2, [1, 2, 3, 4, 5], step=2))
+    [[1, 2], [3, 4]]
+    """
     if size <= 0:
         raise ValueError("size must be positive")
     if step <= 0:
@@ -199,7 +283,34 @@ async def _window_async[T](
 
 
 def partition[T](pred: Callable[[T], bool], it: Iterable[T]) -> tuple[list[T], list[T]]:
-    """Split into (matches, non_matches). Terminal operation."""
+    """Split elements into those that satisfy `pred` and those that don't.
+
+    This is a terminal operation: it consumes `it` entirely and returns lists,
+    so `it` must be finite.
+
+    Parameters
+    ----------
+    pred
+        Predicate called once per element.
+    it
+        Source elements. Must be sync; use `partition_async` for async sources.
+
+    Returns
+    -------
+    tuple[list[T], list[T]]
+        `(matches, non_matches)`, each in source order.
+
+    See Also
+    --------
+    partition_async : The same for async iterables.
+    filter : Lazily keep only the matches.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> st.partition(lambda x: x % 2 == 0, range(6))
+    ([0, 2, 4], [1, 3, 5])
+    """
     matches: list[T] = []
     non_matches: list[T] = []
     for item in it:
@@ -213,7 +324,37 @@ def partition[T](pred: Callable[[T], bool], it: Iterable[T]) -> tuple[list[T], l
 async def partition_async[T](
     pred: Callable[[T], bool], it: AsyncIterable[T]
 ) -> tuple[list[T], list[T]]:
-    """Split into (matches, non_matches). Terminal operation (async)."""
+    """Split async elements into those that satisfy `pred` and those that don't.
+
+    This is a terminal operation: it consumes `it` entirely, so `it` must be
+    finite.
+
+    Parameters
+    ----------
+    pred
+        Predicate called once per element.
+    it
+        Source elements.
+
+    Returns
+    -------
+    tuple[list[T], list[T]]
+        `(matches, non_matches)`, each in source order.
+
+    See Also
+    --------
+    partition : The same for sync iterables.
+
+    Examples
+    --------
+    >>> import asyncio
+    >>> import streamish as st
+    >>> async def numbers():
+    ...     for i in range(6):
+    ...         yield i
+    >>> asyncio.run(st.partition_async(lambda x: x % 2 == 0, numbers()))
+    ([0, 2, 4], [1, 3, 5])
+    """
     matches: list[T] = []
     non_matches: list[T] = []
     async for item in it:

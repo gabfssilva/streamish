@@ -6,10 +6,12 @@ from collections.abc import (
     AsyncIterable,
     AsyncIterator,
     Callable,
+    Container,
     Hashable,
     Iterable,
     Iterator,
 )
+from itertools import islice
 from typing import overload
 
 from streamish._util import is_async_iterable
@@ -28,28 +30,56 @@ def take[T](n: int, it: AsyncIterable[T]) -> AsyncIterator[T]: ...
 def take[T](
     n: int, it: Iterable[T] | AsyncIterable[T]
 ) -> Iterator[T] | AsyncIterator[T]:
-    """Take first n elements."""
+    """Take the first `n` elements.
+
+    No element after the `n`-th is read from `it`, so the rest stay available
+    when `it` is a shared iterator.
+
+    Parameters
+    ----------
+    n
+        Maximum number of elements to take. If `n <= 0`, nothing is taken and
+        nothing is read.
+    it
+        Source elements. The result is async if `it` is async.
+
+    Returns
+    -------
+    Iterator[T] | AsyncIterator[T]
+        Up to `n` elements, in source order.
+
+    See Also
+    --------
+    take_while : Take elements while a predicate holds.
+    skip : Drop the first `n` elements instead.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> numbers = iter(range(5))
+    >>> list(st.take(2, numbers))
+    [0, 1]
+    >>> list(numbers)
+    [2, 3, 4]
+    """
     if is_async_iterable(it):
         return _take_async(n, it)  # type: ignore[arg-type]
     return _take_sync(n, it)  # type: ignore[arg-type, return-value]
 
 
 def _take_sync[T](n: int, it: Iterable[T]) -> Iterator[T]:
-    count = 0
-    for item in it:
-        if count >= n:
-            break
-        yield item
-        count += 1
+    yield from islice(it, max(n, 0))
 
 
 async def _take_async[T](n: int, it: AsyncIterable[T]) -> AsyncIterator[T]:
+    if n <= 0:
+        return
     count = 0
     async for item in it:
-        if count >= n:
-            break
         yield item
         count += 1
+        if count == n:
+            break
 
 
 @overload
@@ -63,7 +93,31 @@ def skip[T](n: int, it: AsyncIterable[T]) -> AsyncIterator[T]: ...
 def skip[T](
     n: int, it: Iterable[T] | AsyncIterable[T]
 ) -> Iterator[T] | AsyncIterator[T]:
-    """Skip first n elements."""
+    """Skip the first `n` elements and emit the rest.
+
+    Parameters
+    ----------
+    n
+        Number of elements to skip. If `n <= 0`, nothing is skipped.
+    it
+        Source elements. The result is async if `it` is async.
+
+    Returns
+    -------
+    Iterator[T] | AsyncIterator[T]
+        The elements after the first `n`, in source order.
+
+    See Also
+    --------
+    skip_while : Skip elements while a predicate holds.
+    take : Keep the first `n` elements instead.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> list(st.skip(3, range(5)))
+    [3, 4]
+    """
     if is_async_iterable(it):
         return _skip_async(n, it)  # type: ignore[arg-type]
     return _skip_sync(n, it)  # type: ignore[arg-type, return-value]
@@ -100,7 +154,37 @@ def take_while[T](
 def take_while[T](
     pred: Callable[[T], bool], it: Iterable[T] | AsyncIterable[T]
 ) -> Iterator[T] | AsyncIterator[T]:
-    """Take elements while predicate is true."""
+    """Take elements until `pred` first returns false.
+
+    The first element that fails `pred` is read from `it` but not emitted, and
+    nothing after it is read.
+
+    Parameters
+    ----------
+    pred
+        Predicate called on each element until it returns false.
+    it
+        Source elements. The result is async if `it` is async.
+
+    Returns
+    -------
+    Iterator[T] | AsyncIterator[T]
+        The leading elements that satisfy `pred`.
+
+    See Also
+    --------
+    skip_while : Drop the leading elements instead.
+    filter : Test every element, not only the leading ones.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> numbers = iter([1, 2, 5, 1])
+    >>> list(st.take_while(lambda x: x < 3, numbers))
+    [1, 2]
+    >>> list(numbers)
+    [1]
+    """
     if is_async_iterable(it):
         return _take_while_async(pred, it)  # type: ignore[arg-type]
     return _take_while_sync(pred, it)  # type: ignore[arg-type, return-value]
@@ -135,7 +219,34 @@ def skip_while[T](
 def skip_while[T](
     pred: Callable[[T], bool], it: Iterable[T] | AsyncIterable[T]
 ) -> Iterator[T] | AsyncIterator[T]:
-    """Skip elements while predicate is true."""
+    """Skip elements until `pred` first returns false, then emit the rest.
+
+    Once an element fails `pred`, it and every later element are emitted
+    without calling `pred` again.
+
+    Parameters
+    ----------
+    pred
+        Predicate called on each element until it returns false.
+    it
+        Source elements. The result is async if `it` is async.
+
+    Returns
+    -------
+    Iterator[T] | AsyncIterator[T]
+        The elements from the first one that fails `pred` onward.
+
+    See Also
+    --------
+    take_while : Keep the leading elements instead.
+    filter : Test every element, not only the leading ones.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> list(st.skip_while(lambda x: x < 3, [1, 2, 5, 1]))
+    [5, 1]
+    """
     if is_async_iterable(it):
         return _skip_while_async(pred, it)  # type: ignore[arg-type]
     return _skip_while_sync(pred, it)  # type: ignore[arg-type, return-value]
@@ -185,113 +296,58 @@ def distinct[T: Hashable](
     window: int | None = None,
     timeout: float | None = None,
 ) -> Iterator[T] | AsyncIterator[T]:
-    """Remove duplicates.
+    """Drop elements equal to one emitted earlier.
 
-    Args:
-        it: Input iterable
-        window: Only consider last N elements as "seen" (LRU-style)
-        timeout: Elements expire from "seen" after N seconds
+    Each emitted element is remembered, and later equal elements are dropped
+    while it is remembered. By default nothing is forgotten, so memory grows
+    with the number of distinct elements. `window` and `timeout` bound that
+    memory; once an element is forgotten, an equal one can be emitted again.
 
-    Without parameters, keeps all seen elements in memory (original behavior).
-    With window and/or timeout, elements can reappear after leaving the window.
+    Parameters
+    ----------
+    it
+        Source elements, which must be hashable. The result is async if `it`
+        is async.
+    window
+        Remember only the last `window` emitted elements. Must be positive.
+    timeout
+        Forget each element `timeout` seconds after it was emitted. Must be
+        positive.
+
+    Returns
+    -------
+    Iterator[T] | AsyncIterator[T]
+        The elements that were not dropped, in source order.
+
+    Raises
+    ------
+    ValueError
+        If `window` or `timeout` is not positive. Raised when `distinct` is
+        called, not when iteration starts.
+
+    See Also
+    --------
+    distinct_by : Compare elements by a key.
+
+    Notes
+    -----
+    A dropped duplicate does not extend how long the original is remembered.
+    With both `window` and `timeout`, an element is forgotten as soon as
+    either limit is reached. `timeout` is measured with `time.monotonic`.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> list(st.distinct([1, 2, 1, 3, 1]))
+    [1, 2, 3]
+
+    With `window=2`, only the last two emitted elements are remembered, so the
+    final `1` passes again:
+
+    >>> list(st.distinct([1, 2, 1, 3, 1], window=2))
+    [1, 2, 3, 1]
     """
-    if is_async_iterable(it):
-        return _distinct_async(it, window, timeout)  # type: ignore[arg-type]
-    return _distinct_sync(it, window, timeout)  # type: ignore[arg-type, return-value]
-
-
-def _distinct_sync[T: Hashable](
-    it: Iterable[T],
-    window: int | None,
-    timeout: float | None,
-) -> Iterator[T]:
-    if window is None and timeout is None:
-        # Original behavior: infinite memory
-        seen: set[T] = set()
-        for item in it:
-            if item not in seen:
-                seen.add(item)
-                yield item
-    elif timeout is None:
-        # Window only: use deque for LRU
-        seen_deque: deque[T] = deque(maxlen=window)
-        seen_set: set[T] = set()
-        for item in it:
-            if item not in seen_set:
-                if len(seen_deque) == window:
-                    # Remove oldest from set
-                    oldest = seen_deque[0]
-                    seen_set.discard(oldest)
-                seen_deque.append(item)
-                seen_set.add(item)
-                yield item
-    else:
-        # Timeout (with optional window): use dict with timestamps
-        seen_times: dict[T, float] = {}
-        seen_order: deque[T] = deque(maxlen=window) if window else deque()
-        for item in it:
-            now = time.monotonic()
-            # Clean expired entries
-            expired = [k for k, t in seen_times.items() if now - t > timeout]
-            for k in expired:
-                del seen_times[k]
-            # Check window limit
-            if window and len(seen_order) == window:
-                oldest = seen_order[0]
-                seen_times.pop(oldest, None)
-            # Check if seen
-            if item not in seen_times:
-                seen_times[item] = now
-                if window:
-                    seen_order.append(item)
-                yield item
-
-
-async def _distinct_async[T: Hashable](
-    it: AsyncIterable[T],
-    window: int | None,
-    timeout: float | None,
-) -> AsyncIterator[T]:
-    if window is None and timeout is None:
-        # Original behavior: infinite memory
-        seen: set[T] = set()
-        async for item in it:
-            if item not in seen:
-                seen.add(item)
-                yield item
-    elif timeout is None:
-        # Window only: use deque for LRU
-        seen_deque: deque[T] = deque(maxlen=window)
-        seen_set: set[T] = set()
-        async for item in it:
-            if item not in seen_set:
-                if len(seen_deque) == window:
-                    # Remove oldest from set
-                    oldest = seen_deque[0]
-                    seen_set.discard(oldest)
-                seen_deque.append(item)
-                seen_set.add(item)
-                yield item
-    else:
-        # Timeout (with optional window): use dict with timestamps
-        seen_times: dict[T, float] = {}
-        seen_order: deque[T] = deque(maxlen=window) if window else deque()
-        async for item in it:
-            now = time.monotonic()
-            # Clean expired entries
-            expired = [k for k, t in seen_times.items() if now - t > timeout]
-            for k in expired:
-                del seen_times[k]
-            # Check window limit
-            if window and len(seen_order) == window:
-                oldest = seen_order[0]
-                seen_times.pop(oldest, None)
-            # Check if seen
-            if item not in seen_times:
-                seen_times[item] = now
-                if window:
-                    seen_order.append(item)
-                yield item
+    return _distinct(None, it, window, timeout)
 
 
 @overload
@@ -321,102 +377,125 @@ def distinct_by[T, K: Hashable](
     window: int | None = None,
     timeout: float | None = None,
 ) -> Iterator[T] | AsyncIterator[T]:
-    """Remove duplicates by key function.
+    """Drop elements whose key equals the key of an element emitted earlier.
 
-    Args:
-        key_fn: Function to extract key from element
-        it: Input iterable
-        window: Only consider last N keys as "seen"
-        timeout: Keys expire from "seen" after N seconds
+    The first element with each key is emitted, and later elements with the
+    same key are dropped while that key is remembered. Keys are remembered as
+    in `distinct`: forever by default, or bounded by `window` and `timeout`.
+
+    Parameters
+    ----------
+    key_fn
+        Function returning a hashable key. Called once per element.
+    it
+        Source elements. The result is async if `it` is async.
+    window
+        Remember only the keys of the last `window` emitted elements. Must be
+        positive.
+    timeout
+        Forget each key `timeout` seconds after its element was emitted. Must
+        be positive.
+
+    Returns
+    -------
+    Iterator[T] | AsyncIterator[T]
+        The elements that were not dropped, in source order.
+
+    Raises
+    ------
+    ValueError
+        If `window` or `timeout` is not positive. Raised when `distinct_by` is
+        called, not when iteration starts.
+
+    See Also
+    --------
+    distinct : Compare the elements themselves.
+
+    Examples
+    --------
+    >>> import streamish as st
+    >>> users = [("ana", 1), ("bia", 2), ("ana", 3)]
+    >>> list(st.distinct_by(lambda user: user[0], users))
+    [('ana', 1), ('bia', 2)]
     """
+    return _distinct(key_fn, it, window, timeout)
+
+
+def _distinct[T, K](
+    key_fn: Callable[[T], K] | None,
+    it: Iterable[T] | AsyncIterable[T],
+    window: int | None,
+    timeout: float | None,
+) -> Iterator[T] | AsyncIterator[T]:
+    remembered: Container[T | K]
+    remember: Callable[[T | K], None]
+    if window is None and timeout is None:
+        keys: set[T | K] = set()
+        remembered, remember = keys, keys.add
+    else:
+        seen: _SeenKeys[T | K] = _SeenKeys(window, timeout)
+        # Only `timeout` forgets keys lazily, so without it the dict is exact and
+        # checking it directly skips a Python-level `__contains__` per element.
+        remembered = seen if timeout is not None else seen.emitted_at
+        remember = seen.add
     if is_async_iterable(it):
-        return _distinct_by_async(key_fn, it, window, timeout)  # type: ignore[arg-type]
-    return _distinct_by_sync(key_fn, it, window, timeout)  # type: ignore[arg-type, return-value]
+        return _distinct_async(key_fn, it, remembered, remember)
+    return _distinct_sync(key_fn, it, remembered, remember)  # type: ignore[arg-type, return-value]
 
 
-def _distinct_by_sync[T, K: Hashable](
-    key_fn: Callable[[T], K],
+class _SeenKeys[K]:
+    """Keys of emitted elements that are still remembered, oldest first."""
+
+    def __init__(self, window: int | None, timeout: float | None) -> None:
+        if window is not None and window < 1:
+            raise ValueError("window must be positive")
+        if timeout is not None and timeout <= 0:
+            raise ValueError("timeout must be positive")
+        self._window = window
+        self._timeout = timeout
+        self.emitted_at: dict[K, float] = {}
+        self._order: deque[K] = deque()
+
+    def __contains__(self, key: object) -> bool:
+        emitted_at = self.emitted_at
+        if self._timeout is not None:
+            order = self._order
+            cutoff = time.monotonic() - self._timeout
+            while order and emitted_at[order[0]] <= cutoff:
+                del emitted_at[order.popleft()]
+        return key in emitted_at
+
+    def add(self, key: K) -> None:
+        self.emitted_at[key] = 0.0 if self._timeout is None else time.monotonic()
+        order = self._order
+        order.append(key)
+        # Keys leave only from the front, so the keys after a remembered key are
+        # exactly the elements emitted after it.
+        if self._window is not None and len(order) > self._window:
+            del self.emitted_at[order.popleft()]
+
+
+def _distinct_sync[T, K](
+    key_fn: Callable[[T], K] | None,
     it: Iterable[T],
-    window: int | None,
-    timeout: float | None,
+    remembered: Container[T | K],
+    remember: Callable[[T | K], None],
 ) -> Iterator[T]:
-    if window is None and timeout is None:
-        seen: set[K] = set()
-        for item in it:
-            key = key_fn(item)
-            if key not in seen:
-                seen.add(key)
-                yield item
-    elif timeout is None:
-        seen_deque: deque[K] = deque(maxlen=window)
-        seen_set: set[K] = set()
-        for item in it:
-            key = key_fn(item)
-            if key not in seen_set:
-                if len(seen_deque) == window:
-                    oldest = seen_deque[0]
-                    seen_set.discard(oldest)
-                seen_deque.append(key)
-                seen_set.add(key)
-                yield item
-    else:
-        seen_times: dict[K, float] = {}
-        seen_order: deque[K] = deque(maxlen=window) if window else deque()
-        for item in it:
-            key = key_fn(item)
-            now = time.monotonic()
-            expired = [k for k, t in seen_times.items() if now - t > timeout]
-            for k in expired:
-                del seen_times[k]
-            if window and len(seen_order) == window:
-                oldest = seen_order[0]
-                seen_times.pop(oldest, None)
-            if key not in seen_times:
-                seen_times[key] = now
-                if window:
-                    seen_order.append(key)
-                yield item
+    for item in it:
+        key = item if key_fn is None else key_fn(item)
+        if key not in remembered:
+            remember(key)
+            yield item
 
 
-async def _distinct_by_async[T, K: Hashable](
-    key_fn: Callable[[T], K],
+async def _distinct_async[T, K](
+    key_fn: Callable[[T], K] | None,
     it: AsyncIterable[T],
-    window: int | None,
-    timeout: float | None,
+    remembered: Container[T | K],
+    remember: Callable[[T | K], None],
 ) -> AsyncIterator[T]:
-    if window is None and timeout is None:
-        seen: set[K] = set()
-        async for item in it:
-            key = key_fn(item)
-            if key not in seen:
-                seen.add(key)
-                yield item
-    elif timeout is None:
-        seen_deque: deque[K] = deque(maxlen=window)
-        seen_set: set[K] = set()
-        async for item in it:
-            key = key_fn(item)
-            if key not in seen_set:
-                if len(seen_deque) == window:
-                    oldest = seen_deque[0]
-                    seen_set.discard(oldest)
-                seen_deque.append(key)
-                seen_set.add(key)
-                yield item
-    else:
-        seen_times: dict[K, float] = {}
-        seen_order: deque[K] = deque(maxlen=window) if window else deque()
-        async for item in it:
-            key = key_fn(item)
-            now = time.monotonic()
-            expired = [k for k, t in seen_times.items() if now - t > timeout]
-            for k in expired:
-                del seen_times[k]
-            if window and len(seen_order) == window:
-                oldest = seen_order[0]
-                seen_times.pop(oldest, None)
-            if key not in seen_times:
-                seen_times[key] = now
-                if window:
-                    seen_order.append(key)
-                yield item
+    async for item in it:
+        key = item if key_fn is None else key_fn(item)
+        if key not in remembered:
+            remember(key)
+            yield item

@@ -1,7 +1,10 @@
 """Tests for filter operations."""
 
+import asyncio
 import time
 from collections.abc import AsyncIterator
+
+import pytest
 
 import streamish as st
 
@@ -23,6 +26,44 @@ async def test_take_async() -> None:
 
     result = [x async for x in st.take(3, gen())]
     assert result == [0, 1, 2]
+
+
+def test_take_sync_leaves_rest_in_source() -> None:
+    src = iter([1, 2, 3, 4])
+    result = list(st.take(2, src))
+    assert result == [1, 2]
+    assert list(src) == [3, 4]
+
+
+def test_take_non_positive_sync_pulls_nothing() -> None:
+    for n in (0, -1):
+        src = iter([1, 2, 3])
+        result = list(st.take(n, src))
+        assert result == []
+        assert list(src) == [1, 2, 3]
+
+
+async def test_take_async_leaves_rest_in_source() -> None:
+    async def gen() -> AsyncIterator[int]:
+        for i in [1, 2, 3, 4]:
+            yield i
+
+    src = gen()
+    result = [x async for x in st.take(2, src)]
+    assert result == [1, 2]
+    assert [x async for x in src] == [3, 4]
+
+
+async def test_take_non_positive_async_pulls_nothing() -> None:
+    async def gen() -> AsyncIterator[int]:
+        for i in [1, 2, 3]:
+            yield i
+
+    for n in (0, -1):
+        src = gen()
+        result = [x async for x in st.take(n, src)]
+        assert result == []
+        assert [x async for x in src] == [1, 2, 3]
 
 
 def test_skip_sync() -> None:
@@ -156,3 +197,118 @@ async def test_distinct_by_with_window_async() -> None:
 
     result = [x async for x in st.distinct_by(lambda x: x["id"], gen(), window=2)]
     assert result == [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 1}]
+
+
+def test_distinct_with_window_and_timeout() -> None:
+    result = list(st.distinct(["a", "b", "a"], window=2, timeout=60))
+    assert result == ["a", "b"]
+
+
+async def test_distinct_with_window_and_timeout_async() -> None:
+    async def gen() -> AsyncIterator[str]:
+        for item in ["a", "b", "a"]:
+            yield item
+
+    result = [x async for x in st.distinct(gen(), window=2, timeout=60)]
+    assert result == ["a", "b"]
+
+
+def test_distinct_by_with_window_and_timeout() -> None:
+    result = list(st.distinct_by(str.lower, ["a", "b", "A"], window=2, timeout=60))
+    assert result == ["a", "b"]
+
+
+async def test_distinct_by_with_window_and_timeout_async() -> None:
+    async def gen() -> AsyncIterator[str]:
+        for item in ["a", "b", "A"]:
+            yield item
+
+    result = [x async for x in st.distinct_by(str.lower, gen(), window=2, timeout=60)]
+    assert result == ["a", "b"]
+
+
+def test_distinct_window_keeps_key_reemitted_after_timeout() -> None:
+    result: list[str] = []
+    for item in st.distinct(["a", "a", "b", "a"], window=2, timeout=0.05):
+        result.append(item)
+        if result == ["a"]:
+            time.sleep(0.1)  # Wait for "a" to expire
+
+    # a seen, sleep 0.1s, a expired (yield), b seen, a in window and fresh (skip)
+    assert result == ["a", "a", "b"]
+
+
+async def test_distinct_window_keeps_key_reemitted_after_timeout_async() -> None:
+    async def gen() -> AsyncIterator[str]:
+        for item in ["a", "a", "b", "a"]:
+            yield item
+
+    result: list[str] = []
+    async for item in st.distinct(gen(), window=2, timeout=0.05):
+        result.append(item)
+        if result == ["a"]:
+            await asyncio.sleep(0.1)  # Wait for "a" to expire
+
+    assert result == ["a", "a", "b"]
+
+
+def test_distinct_by_window_keeps_key_reemitted_after_timeout() -> None:
+    result: list[str] = []
+    for item in st.distinct_by(str.lower, ["a", "A", "b", "a"], window=2, timeout=0.05):
+        result.append(item)
+        if result == ["a"]:
+            time.sleep(0.1)  # Wait for key "a" to expire
+
+    # a seen, sleep 0.1s, A expired (yield), b seen, a in window and fresh (skip)
+    assert result == ["a", "A", "b"]
+
+
+async def test_distinct_by_window_keeps_key_reemitted_after_timeout_async() -> None:
+    async def gen() -> AsyncIterator[str]:
+        for item in ["a", "A", "b", "a"]:
+            yield item
+
+    result: list[str] = []
+    async for item in st.distinct_by(str.lower, gen(), window=2, timeout=0.05):
+        result.append(item)
+        if result == ["a"]:
+            await asyncio.sleep(0.1)  # Wait for key "a" to expire
+
+    assert result == ["a", "A", "b"]
+
+
+invalid_window_or_timeout = pytest.mark.parametrize(
+    ("window", "timeout", "message"),
+    [
+        (0, None, "window must be positive"),
+        (-1, None, "window must be positive"),
+        (None, 0, "timeout must be positive"),
+        (None, -0.5, "timeout must be positive"),
+    ],
+)
+
+
+@invalid_window_or_timeout
+def test_distinct_rejects_invalid_window_or_timeout(
+    window: int | None, timeout: float | None, message: str
+) -> None:
+    async def gen() -> AsyncIterator[str]:
+        yield "a"
+
+    with pytest.raises(ValueError, match=message):
+        st.distinct(["a", "a"], window=window, timeout=timeout)
+    with pytest.raises(ValueError, match=message):
+        st.distinct(gen(), window=window, timeout=timeout)
+
+
+@invalid_window_or_timeout
+def test_distinct_by_rejects_invalid_window_or_timeout(
+    window: int | None, timeout: float | None, message: str
+) -> None:
+    async def gen() -> AsyncIterator[str]:
+        yield "a"
+
+    with pytest.raises(ValueError, match=message):
+        st.distinct_by(str.lower, ["a", "a"], window=window, timeout=timeout)
+    with pytest.raises(ValueError, match=message):
+        st.distinct_by(str.lower, gen(), window=window, timeout=timeout)
