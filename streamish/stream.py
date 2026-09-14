@@ -598,3 +598,26 @@ class Stream[T]:
         [2, 4, 6]
         """
         return Stream(map_async_op(fn, self._source, concurrency=concurrency))
+
+    def to_async(self) -> "Stream[T]":
+        """Make the stream async, whatever its source is.
+
+        A sync source is wrapped in an async iterator, so every operation
+        after this one takes its async path and the stream can feed operations
+        that require async inputs, such as `merge`. An async stream keeps the
+        behavior it already had.
+
+        The wrapper reads the source inline and has no suspension points, so a
+        source that blocks the thread blocks the event loop until it is
+        exhausted. It suits sources already in memory, not blocking I/O.
+
+        Examples
+        --------
+        >>> import asyncio
+        >>> import streamish as st
+        >>> async def main():
+        ...     return [x async for x in st.stream([1, 2, 3]).to_async()]
+        >>> asyncio.run(main())
+        [1, 2, 3]
+        """
+        return Stream(self._aiter_impl())
